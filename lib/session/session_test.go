@@ -18,6 +18,7 @@ package session
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -28,10 +29,22 @@ import (
 
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 )
 
-func TestSessions(t *testing.T) { TestingT(t) }
+func TestSessions(t *testing.T) {
+	utils.InitLoggerForTests(testing.Verbose())
+	s := NewSessionSuite(t)
+
+	t.Cleanup(func() {
+		TearDownSessionSuite(s, t)
+	})
+
+	t.Run("TestID", func(t *testing.T) { s.TestID(t) })
+	t.Run("TestSessionsCRUD", func(t *testing.T) { s.TestSessionsCRUD(t) })
+	t.Run("TestSessionsInactivity", func(t *testing.T) { s.TestSessionsInactivity(t) })
+	t.Run("TestPartiesCRUD", func(t *testing.T) { s.TestPartiesCRUD(t) })
+}
 
 type SessionSuite struct {
 	dir   string
@@ -40,52 +53,47 @@ type SessionSuite struct {
 	clock clockwork.FakeClock
 }
 
-var _ = Suite(&SessionSuite{})
-
-func (s *SessionSuite) SetUpSuite(c *C) {
-	utils.InitLoggerForTests(testing.Verbose())
-}
-
-func (s *SessionSuite) SetUpTest(c *C) {
+func NewSessionSuite(t *testing.T) *SessionSuite {
 	var err error
+	s := &SessionSuite{}
 
 	s.clock = clockwork.NewFakeClockAt(time.Date(2016, 9, 8, 7, 6, 5, 0, time.UTC))
-	s.dir = c.MkDir()
-
+	s.dir = t.TempDir()
 	s.bk, err = lite.NewWithConfig(context.TODO(),
 		lite.Config{
 			Path:  s.dir,
 			Clock: s.clock,
 		},
 	)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	srv, err := New(s.bk)
+	require.NoError(t, err)
 	srv.(*server).clock = s.clock
 	s.srv = srv.(*server)
-	c.Assert(err, IsNil)
+	return s
 }
 
-func (s *SessionSuite) TearDownTest(c *C) {
-	c.Assert(s.bk.Close(), IsNil)
+func TearDownSessionSuite(s *SessionSuite, t *testing.T) {
+	require.NoError(t, s.bk.Close())
 }
 
-func (s *SessionSuite) TestID(c *C) {
+func (s *SessionSuite) TestID(t *testing.T) {
 	id := NewID()
 	id2, err := ParseID(id.String())
-	c.Assert(err, IsNil)
-	c.Assert(id, Equals, *id2)
+	require.NoError(t, err)
+	require.Equal(t, id, *id2)
 
 	for _, val := range []string{"garbage", "", "   ", string(id) + "extra"} {
 		id := ID(val)
-		c.Assert(id.Check(), NotNil)
+		require.Error(t, id.Check())
 	}
 }
 
-func (s *SessionSuite) TestSessionsCRUD(c *C) {
+func (s *SessionSuite) TestSessionsCRUD(t *testing.T) {
 	out, err := s.srv.GetSessions(defaults.Namespace)
-	c.Assert(err, IsNil)
-	c.Assert(len(out), Equals, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(out), 0)
 
 	// Create session.
 	sess := Session{
@@ -96,17 +104,17 @@ func (s *SessionSuite) TestSessionsCRUD(c *C) {
 		LastActive:     s.clock.Now().UTC(),
 		Created:        s.clock.Now().UTC(),
 	}
-	c.Assert(s.srv.CreateSession(sess), IsNil)
+	require.NoError(t, s.srv.CreateSession(sess))
 
 	// Make sure only one session exists.
 	out, err = s.srv.GetSessions(defaults.Namespace)
-	c.Assert(err, IsNil)
-	c.Assert(out, DeepEquals, []Session{sess})
+	require.NoError(t, err)
+	require.True(t, reflect.DeepEqual(out, []Session{sess}))
 
 	// Make sure the session is the one created above.
 	s2, err := s.srv.GetSession(defaults.Namespace, sess.ID)
-	c.Assert(err, IsNil)
-	c.Assert(s2, DeepEquals, &sess)
+	require.NoError(t, err)
+	require.True(t, reflect.DeepEqual(s2, &sess))
 
 	// Update session terminal parameter
 	err = s.srv.UpdateSession(UpdateRequest{
@@ -114,26 +122,26 @@ func (s *SessionSuite) TestSessionsCRUD(c *C) {
 		Namespace:      defaults.Namespace,
 		TerminalParams: &TerminalParams{W: 101, H: 101},
 	})
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// Verify update was applied.
 	sess.TerminalParams = TerminalParams{W: 101, H: 101}
 	s2, err = s.srv.GetSession(defaults.Namespace, sess.ID)
-	c.Assert(err, IsNil)
-	c.Assert(s2, DeepEquals, &sess)
+	require.NoError(t, err)
+	require.True(t, reflect.DeepEqual(s2, &sess))
 
 	// Remove the session.
 	err = s.srv.DeleteSession(defaults.Namespace, sess.ID)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// Make sure session no longer exists.
 	_, err = s.srv.GetSession(defaults.Namespace, sess.ID)
-	c.Assert(err, NotNil)
+	require.Error(t, err)
 }
 
 // TestSessionsInactivity makes sure that session will be marked
 // as inactive after period of inactivity
-func (s *SessionSuite) TestSessionsInactivity(c *C) {
+func (s *SessionSuite) TestSessionsInactivity(t *testing.T) {
 	sess := Session{
 		ID:             NewID(),
 		Namespace:      defaults.Namespace,
@@ -142,19 +150,19 @@ func (s *SessionSuite) TestSessionsInactivity(c *C) {
 		LastActive:     s.clock.Now().UTC(),
 		Created:        s.clock.Now().UTC(),
 	}
-	c.Assert(s.srv.CreateSession(sess), IsNil)
+	require.NoError(t, s.srv.CreateSession(sess))
 
 	// move forward in time:
 	s.clock.Advance(defaults.ActiveSessionTTL + time.Second)
 
 	// should not be in active sessions:
 	s2, err := s.srv.GetSession(defaults.Namespace, sess.ID)
-	c.Assert(err, NotNil)
-	c.Assert(trace.IsNotFound(err), Equals, true)
-	c.Assert(s2, IsNil)
+	require.Error(t, err)
+	require.True(t, trace.IsNotFound(err))
+	require.Nil(t, s2)
 }
 
-func (s *SessionSuite) TestPartiesCRUD(c *C) {
+func (s *SessionSuite) TestPartiesCRUD(t *testing.T) {
 	// create session:
 	sess := Session{
 		ID:             NewID(),
@@ -164,7 +172,8 @@ func (s *SessionSuite) TestPartiesCRUD(c *C) {
 		LastActive:     s.clock.Now().UTC(),
 		Created:        s.clock.Now().UTC(),
 	}
-	c.Assert(s.srv.CreateSession(sess), IsNil)
+	err := s.srv.CreateSession(sess)
+	require.NoError(t, err)
 	// add two people:
 	parties := []Party{
 		{
@@ -182,31 +191,31 @@ func (s *SessionSuite) TestPartiesCRUD(c *C) {
 			LastActive: s.clock.Now().UTC(),
 		},
 	}
-	err := s.srv.UpdateSession(UpdateRequest{
+	err = s.srv.UpdateSession(UpdateRequest{
 		ID:        sess.ID,
 		Namespace: defaults.Namespace,
 		Parties:   &parties,
 	})
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	// verify they're in the session:
 	copy, err := s.srv.GetSession(defaults.Namespace, sess.ID)
-	c.Assert(err, IsNil)
-	c.Assert(len(copy.Parties), Equals, 2)
+	require.NoError(t, err)
+	require.Equal(t, len(copy.Parties), 2)
 
 	// empty update (list of parties must not change)
 	err = s.srv.UpdateSession(UpdateRequest{ID: sess.ID, Namespace: defaults.Namespace})
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	copy, _ = s.srv.GetSession(defaults.Namespace, sess.ID)
-	c.Assert(len(copy.Parties), Equals, 2)
+	require.Equal(t, len(copy.Parties), 2)
 
 	// remove the 2nd party:
 	deleted := copy.RemoveParty(parties[1].ID)
-	c.Assert(deleted, Equals, true)
+	require.True(t, deleted)
 	err = s.srv.UpdateSession(UpdateRequest{ID: copy.ID, Parties: &copy.Parties, Namespace: defaults.Namespace})
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	copy, _ = s.srv.GetSession(defaults.Namespace, sess.ID)
-	c.Assert(len(copy.Parties), Equals, 1)
+	require.Equal(t, len(copy.Parties), 1)
 
 	// we still have the 1st party in:
-	c.Assert(parties[0].ID, Equals, copy.Parties[0].ID)
+	require.Equal(t, parties[0].ID, copy.Parties[0].ID)
 }
